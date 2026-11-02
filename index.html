@@ -1,0 +1,917 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0b1020">
+<title>Flappy Bird - 4 عوالم</title>
+<style>
+html,body{margin:0;height:100%;background:#0b1020;overflow:hidden;overscroll-behavior:none;touch-action:none;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+body{display:flex;align-items:center;justify-content:center}
+canvas{display:block;image-rendering:crisp-edges;image-rendering:pixelated;touch-action:none;outline:none;background:#000}
+</style>
+</head>
+<body>
+<canvas id="c" width="288" height="512"></canvas>
+<script>
+(function () {
+'use strict';
+
+/* =====================================================================
+   الإعدادات  (غيّر POINTS_PER_WORLD لتغيير عدد النقاط بين العوالم)
+   اختبار سريع:  ملف.html?world=3   أو   ملف.html?pts=3
+   ===================================================================== */
+var W = 288, H = 512, S = 2, HW = 144, HH = 256;
+var GROUND_H = 56, GROUND_Y = H - GROUND_H, GY = GROUND_Y / S;
+var QS = new URLSearchParams(location.search);
+var POINTS_PER_WORLD = (function () { var v = parseInt(QS.get('pts'), 10); return v >= 1 && v <= 100 ? v : 10; })();
+var START = (function () { var v = parseInt(QS.get('world'), 10); return v >= 1 && v <= 4 ? v - 1 : 0; })();
+var BIRD_X = 84;
+var PIPE_W = 52, CAP_H = 24, PIPE_SPACING = 172;
+var GRAV = 1400, FLAP = 410, MAX_FALL = 580, TRANS_T = 1.6;
+
+/* =====================================================================
+   أدوات الرسم
+   ===================================================================== */
+function rng(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; var t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+function smooth(t) { t = clamp(t, 0, 1); return t * t * (3 - 2 * t); }
+function mk(w, h) { var c = document.createElement('canvas'); c.width = w; c.height = h; var g = c.getContext('2d'); g.imageSmoothingEnabled = false; return { c: c, g: g }; }
+function R(g, col, x, y, w, h) { if (w < 1 || h < 1) return; g.fillStyle = col; g.fillRect(Math.floor(x), Math.floor(y), Math.floor(w), Math.floor(h)); }
+function disc(g, col, cx, cy, r) { for (var dy = -r; dy <= r; dy++) { var w = Math.floor(Math.sqrt(r * r - dy * dy + 0.5)); R(g, col, cx - w, cy + dy, w * 2 + 1, 1); } }
+function rgb(c) { return [parseInt(c.substr(1, 2), 16), parseInt(c.substr(3, 2), 16), parseInt(c.substr(5, 2), 16)]; }
+function mix(a, b, t) { var A = rgb(a), B = rgb(b); return 'rgb(' + Math.round(A[0] + (B[0] - A[0]) * t) + ',' + Math.round(A[1] + (B[1] - A[1]) * t) + ',' + Math.round(A[2] + (B[2] - A[2]) * t) + ')'; }
+function bands(g, stops, y0, y1, bh) {
+  var n = Math.ceil((y1 - y0) / bh);
+  for (var i = 0; i < n; i++) {
+    var f = (n > 1 ? i / (n - 1) : 0) * (stops.length - 1), k = Math.min(stops.length - 2, Math.floor(f));
+    R(g, mix(stops[k], stops[k + 1], f - k), 0, y0 + i * bh, HW, Math.min(bh, y1 - (y0 + i * bh)));
+  }
+}
+function wr(fn) { fn(-HW); fn(0); fn(HW); }
+function cloud(g, x, y, s, c1, c2) {
+  var A = [[7, 0, 6], [3, 2, 14], [1, 4, 20], [0, 6, 22], [0, 8, 22]];
+  for (var i = 0; i < A.length; i++) R(g, i >= 4 ? c2 : c1, x + A[i][0] * s, y + A[i][1] * s, A[i][2] * s, 2 * s);
+}
+function pyramid(g, cx, base, hb, h, lit, shade, l1, l2) {
+  var top = base - h, i;
+  for (i = 0; i < h; i++) {
+    var half = Math.max(1, Math.round(hb * (i + 1) / h)), y = top + i;
+    R(g, lit, cx - half, y, half, 1); R(g, shade, cx, y, half, 1);
+    if (i % 4 === 3) { R(g, l1, cx - half, y, half, 1); R(g, l2, cx, y, half, 1); }
+  }
+  for (var b = 0; b * 4 < h; b++) {
+    var yy = top + b * 4, off = (b % 2) * 5, hf = Math.round(hb * (b * 4 + 1) / h);
+    for (var j = -hb + off; j < hb; j += 10) { if (Math.abs(j) < hf - 1) R(g, j < 0 ? l1 : l2, cx + j, yy, 1, 3); }
+  }
+  R(g, '#fff2c4', cx - 1, top, 2, 1);
+}
+function pine(g, cx, base, hgt, wd, cL, cD, sn) {
+  var n = Math.max(3, Math.round(hgt / 16)), step = hgt / (n + 0.8);
+  R(g, cD, cx - 1, base - 6, 2, 6);
+  for (var k = 0; k < n; k++) {
+    var apex = base - hgt + k * step, th = Math.round(step * 1.9), hw = Math.round(wd * (0.35 + 0.65 * (k + 1) / n) / 2);
+    for (var r = 0; r < th; r++) {
+      var half = Math.max(1, Math.round(hw * (r + 1) / th)), y = Math.round(apex + r), snow = sn && r < th * 0.45;
+      R(g, snow ? sn[0] : cL, cx - half, y, half, 1); R(g, snow ? sn[1] : cD, cx, y, half, 1);
+    }
+  }
+}
+function mountain(g, cx, base, h, hw, lit, shade, sL, sS, frac, seed) {
+  for (var x = -hw; x <= hw; x++) {
+    var t = 1 - Math.abs(x) / hw, ch = Math.round(h * t + 1.5 * Math.sin(x * 1.3 + seed));
+    if (ch < 1) continue;
+    var top = base - ch, left = x < 0;
+    R(g, left ? lit : shade, cx + x, top, 1, ch);
+    var depth = Math.max(0, ch - h * (1 - frac) + Math.round(2 * Math.sin(x * 1.1 + seed)));
+    if (depth > 0) R(g, left ? sL : sS, cx + x, top, 1, Math.min(depth, ch));
+  }
+}
+
+/* =====================================================================
+   العالم 1 : السهول الخضراء  (طواحين ومزارع)
+   ===================================================================== */
+function buildW1() {
+  var r = rng(11), g, i;
+  var sky = mk(HW, HH); g = sky.g;
+  bands(g, ['#3f9be0', '#6cbcf0', '#a8dcf6', '#dff3ea'], 0, GY, 4);
+  R(g, '#6ab83e', 0, GY, HW, HH - GY);
+  disc(g, '#fff1a8', 112, 32, 10); disc(g, '#fffbd8', 112, 32, 8);
+
+  var l0 = mk(HW, 60);
+  wr(function (o) { cloud(l0.g, 6 + o, 8, 1, '#fff', '#d6e8f6'); cloud(l0.g, 50 + o, 24, 2, '#fff', '#d6e8f6'); cloud(l0.g, 106 + o, 6, 1, '#fff', '#d6e8f6'); });
+
+  var hillA = function (x) { var t = x / HW * Math.PI * 2; return 44 + 8 * Math.sin(t * 2 + 0.6) + 5 * Math.sin(t * 5 + 1.3) + 3 * Math.sin(t * 9); };
+  var hillB = function (x) { var t = x / HW * Math.PI * 2; return 26 + 7 * Math.sin(t * 3 + 2.1) + 4 * Math.sin(t * 7 + 0.2); };
+  var l1 = mk(HW, 92);
+  for (var x = 0; x < HW; x++) {
+    var ta = 92 - Math.round(hillA(x)), tb = 92 - Math.round(hillB(x));
+    R(l1.g, '#8fd0a8', x, ta, 1, 92 - ta); R(l1.g, '#b6e6c4', x, ta, 1, 1);
+    R(l1.g, '#6cba68', x, tb, 1, 92 - tb); R(l1.g, '#92d484', x, tb, 1, 1);
+  }
+  var tl = []; for (i = 0; i < 12; i++) tl.push(Math.floor(r() * HW));
+  wr(function (o) { tl.forEach(function (tx) { var y = 92 - Math.round(hillB(tx)); R(l1.g, '#3f9a4a', tx - 1 + o, y - 4, 3, 4); R(l1.g, '#5cba5c', tx - 1 + o, y - 4, 1, 2); }); });
+
+  var l2 = mk(HW, 72), m = l2.g, FT = 54;
+  R(m, '#68c844', 0, FT - 4, HW, 4); R(m, '#7edc54', 0, FT - 4, HW, 1);
+  for (var y = FT; y < 72; y++) R(m, (((y - FT) >> 1) & 1) ? '#5eb83e' : '#4fa634', 0, y, HW, 1);
+  for (x = 0; x < HW; x += 6) R(m, '#74cc4c', x, FT, 1, 72 - FT);
+  for (y = FT; y < 72; y++) R(m, (((y - FT) >> 1) & 1) ? '#e8c850' : '#d6b63e', 86, y, 54, 1);
+  for (x = 88; x < 140; x += 4) R(m, '#f4dc70', x, FT, 1, 72 - FT);
+  var fl = []; for (i = 0; i < 16; i++) fl.push([Math.floor(r() * HW), r() < 0.5 ? '#ff6a6a' : '#ffe86a']);
+  fl.forEach(function (f) { R(m, f[1], f[0], FT - 2, 1, 1); });
+  // مطحنة
+  (function () {
+    var cx = 28, top = 22, bot = FT - 1;
+    for (var yy = top; yy < bot; yy++) {
+      var w = Math.round(8 + (yy - top) * 8 / (bot - top)), x0 = cx - (w >> 1);
+      R(m, '#f0e4c8', x0, yy, w >> 1, 1); R(m, '#c8b48c', cx, yy, w - (w >> 1), 1);
+      if ((yy - top) % 5 === 0) R(m, '#b09c74', x0, yy, w, 1);
+    }
+    R(m, '#6a4428', cx - 2, bot - 7, 5, 7); R(m, '#4a6a98', cx - 1, top + 10, 3, 3);
+    for (var k = 0; k < 7; k++) { var rw = Math.round(4 + k * 1.3); R(m, '#c4482e', cx - (rw >> 1), top - 7 + k, rw >> 1, 1); R(m, '#8a2c1c', cx, top - 7 + k, rw - (rw >> 1), 1); }
+    disc(m, '#5a3a20', cx, top - 3, 2);
+  })();
+  // سياج
+  for (x = 4; x <= 20; x += 4) R(m, '#8a6038', x, FT - 8, 2, 7);
+  R(m, '#a87848', 4, FT - 6, 18, 1); R(m, '#a87848', 4, FT - 3, 18, 1);
+  // أشجار
+  [56, 134].forEach(function (cx) { R(m, '#6a4428', cx - 1, FT - 7, 2, 7); disc(m, '#2e8a3a', cx, FT - 12, 6); disc(m, '#4cac48', cx - 1, FT - 13, 4); R(m, '#78cc5c', cx - 3, FT - 16, 2, 1); });
+  // إسطبل
+  (function () {
+    var cx = 84;
+    R(m, '#c4402c', 70, 38, 28, 16); R(m, '#a03020', 91, 38, 7, 16);
+    for (var xx = 72; xx < 98; xx += 4) R(m, '#a83624', xx, 39, 1, 15);
+    R(m, '#f4ead8', 70, 38, 28, 1);
+    for (var i2 = 0; i2 < 10; i2++) { var w = Math.round(8 + i2 * 2.9); R(m, '#7a4630', cx - (w >> 1), 28 + i2, w >> 1, 1); R(m, '#5a2e1e', cx, 28 + i2, w - (w >> 1), 1); }
+    R(m, '#f4ead8', cx - 5, 43, 10, 11); R(m, '#b83a28', cx - 4, 44, 8, 10);
+    for (var k = 0; k < 8; k++) { R(m, '#f4ead8', cx - 4 + k, 44 + k, 1, 1); R(m, '#f4ead8', cx + 3 - k, 44 + k, 1, 1); }
+    R(m, '#f4ead8', cx - 2, 31, 4, 4); R(m, '#3a2a20', cx - 1, 32, 2, 2);
+    R(m, '#c8d0d8', 102, 32, 8, 22); R(m, '#a0aab8', 107, 32, 3, 22); R(m, '#8a94a4', 103, 30, 6, 2); R(m, '#8a94a4', 104, 29, 4, 1);
+    R(m, '#8a94a4', 102, 38, 8, 1); R(m, '#8a94a4', 102, 45, 8, 1);
+  })();
+  // كومة قش
+  for (i = 0; i < 8; i++) { var hw = Math.round(6 + i * 1.6); R(m, '#e6c458', 122 - hw, 46 + i, hw, 1); R(m, '#c8a440', 122, 46 + i, hw, 1); }
+  R(m, '#f4de88', 118, 49, 6, 1); R(m, '#f4de88', 120, 52, 8, 1);
+
+  var gr = mk(HW, 31); g = gr.g;
+  R(g, '#dcb878', 0, 3, HW, 28);
+  R(g, '#3e8a28', 0, 3, HW, 1);
+  for (y = 4; y < 8; y++) for (x = 0; x < HW; x++) R(g, (((x + y) >> 2) & 1) ? '#62c83a' : '#78d84a', x, y, 1, 1);
+  R(g, '#3e8a28', 0, 8, HW, 1); R(g, '#b8905a', 0, 9, HW, 2);
+  var cols = ['#c8a468', '#ecd096', '#b89058'];
+  for (i = 0; i < 46; i++) R(g, cols[i % 3], Math.floor(r() * HW), 11 + Math.floor(r() * 19), 1 + (i & 1), 1);
+  for (i = 0; i < 18; i++) { var tx = Math.floor(r() * HW); R(g, '#5cc038', tx, 1, 1, 3); R(g, '#78d84a', tx + 1, 2, 1, 2); }
+
+  var wm = [{ x: 28, y: 19 }];
+  return {
+    name: 'السهول الخضراء', sub: 'طواحين ومزارع', accent: '#7be04a',
+    layers: [{ st: 1, c: sky.c }, { c: l0.c, y: 0, sp: 0.03, drift: 6 }, { c: l1.c, y: (GY - 92) * S, sp: 0.1 }, { c: l2.c, y: (GY - 72) * S, sp: 0.25 }],
+    ground: { c: gr.c, y: GROUND_Y - 6, sp: 1 },
+    fxBack: function (ctx, a) {
+      ctx.globalAlpha = a;
+      var base = -(Math.floor(dist * 0.25) % W);
+      wm.forEach(function (w) {
+        for (var k = 0; k < 2; k++) blades(ctx, base + w.x * S + k * W, (GY - 72 + w.y) * S, time * 1.1);
+      });
+      ctx.fillStyle = '#3a4a6a';
+      birds.forEach(function (b) {
+        var px = Math.round(b.x), py = Math.round(b.y);
+        if (Math.floor(b.w) % 2) { ctx.fillRect(px, py + 2, 2, 2); ctx.fillRect(px + 2, py, 2, 2); ctx.fillRect(px + 4, py + 2, 2, 2); }
+        else { ctx.fillRect(px, py, 2, 2); ctx.fillRect(px + 2, py + 2, 2, 2); ctx.fillRect(px + 4, py, 2, 2); }
+      });
+      ctx.globalAlpha = 1;
+    }
+  };
+}
+function blades(ctx, cx, cy, ang) {
+  for (var b = 0; b < 4; b++) {
+    var a = ang + b * Math.PI / 2, ca = Math.cos(a), sa = Math.sin(a);
+    for (var r = 4; r <= 34; r += 2) {
+      var x = Math.round(cx + ca * r), y = Math.round(cy + sa * r);
+      ctx.fillStyle = '#7a4a28'; ctx.fillRect(x - 1, y - 1, 2, 2);
+      if (r >= 12) {
+        ctx.fillStyle = '#f4ecd4';
+        ctx.fillRect(Math.round(x - sa * 2) - 1, Math.round(y + ca * 2) - 1, 2, 2);
+        ctx.fillStyle = '#d8ccb0';
+        ctx.fillRect(Math.round(x - sa * 4) - 1, Math.round(y + ca * 4) - 1, 2, 2);
+      }
+    }
+  }
+  ctx.fillStyle = '#5a3a20'; ctx.fillRect(Math.round(cx) - 3, Math.round(cy) - 3, 6, 6);
+  ctx.fillStyle = '#a07040'; ctx.fillRect(Math.round(cx) - 1, Math.round(cy) - 1, 2, 2);
+}
+
+/* =====================================================================
+   العالم 2 : الصحراء  (أهرامات وأبو الهول)
+   ===================================================================== */
+function buildW2() {
+  var r = rng(22), g, i, x, y;
+  var sky = mk(HW, HH); g = sky.g;
+  bands(g, ['#4ea4dc', '#8ccaec', '#f6e4b0', '#f8c47c'], 0, GY, 4);
+  R(g, '#f0c070', 0, GY, HW, HH - GY);
+  disc(g, '#ffe58a', 34, 44, 15); disc(g, '#fff4b8', 34, 44, 12); disc(g, '#fffbe0', 34, 44, 9);
+
+  var l0 = mk(HW, 60);
+  var st = [[10, 14, 30], [70, 30, 40], [112, 10, 24]];
+  wr(function (o) { st.forEach(function (s) { R(l0.g, 'rgba(255,255,255,0.55)', s[0] + o, s[1], s[2], 2); R(l0.g, 'rgba(255,255,255,0.4)', s[0] + 4 + o, s[1] + 2, s[2] - 8, 1); }); });
+
+  var duneA = function (x) { var t = x / HW * Math.PI * 2; return 34 + 8 * Math.sin(2 * t + 0.4) + 5 * Math.sin(3 * t + 1.1); };
+  var duneB = function (x) { var t = x / HW * Math.PI * 2; return 20 + 6 * Math.sin(2 * t + 2) + 4 * Math.sin(5 * t + 0.7); };
+  var l1 = mk(HW, 96);
+  wr(function (o) { pyramid(l1.g, 22 + o, 72, 10, 14, '#ecc884', '#d0a660', '#dcb470', '#c09450'); pyramid(l1.g, 106 + o, 72, 8, 11, '#ecc884', '#d0a660', '#dcb470', '#c09450'); });
+  for (x = 0; x < HW; x++) {
+    var ta = 96 - Math.round(duneA(x)), tb = 96 - Math.round(duneB(x));
+    R(l1.g, '#f3cd82', x, ta, 1, 96 - ta); R(l1.g, '#fbe3a8', x, ta, 1, 1);
+    R(l1.g, '#e9bb68', x, tb, 1, 96 - tb); R(l1.g, '#f4d088', x, tb, 1, 1);
+  }
+
+  var l2 = mk(HW, 88), m = l2.g, FT = 72;
+  R(m, '#f2d080', 0, FT - 3, HW, 3);
+  for (y = FT; y < 88; y++) R(m, (((y - FT) >> 1) & 1) ? '#f0cc78' : '#e8c068', 0, y, HW, 1);
+  for (i = 0; i < 20; i++) R(m, '#fadf9c', Math.floor(r() * HW), FT + Math.floor(r() * 16), 6, 1);
+  pyramid(m, 36, FT, 30, 56, '#f6dc98', '#c99a54', '#dcb470', '#a87c3c');
+  pyramid(m, 84, FT, 22, 36, '#f2d48c', '#bf9048', '#d4aa66', '#a07434');
+  (function () { // أبو الهول
+    var x0 = 98, B = FT;
+    R(m, '#c8a050', x0 - 1, B - 1, 38, 2);
+    R(m, '#e6b862', x0, B - 9, 24, 9); R(m, '#e6b862', x0, B - 12, 9, 3); R(m, '#c08c40', x0, B - 3, 24, 3); R(m, '#f6d890', x0 + 1, B - 9, 22, 1);
+    R(m, '#edc474', x0 + 24, B - 5, 12, 5); R(m, '#b88438', x0 + 24, B - 3, 12, 1); R(m, '#b88438', x0 + 29, B - 5, 1, 5); R(m, '#b88438', x0 + 33, B - 5, 1, 5);
+    R(m, '#ecc070', x0 + 20, B - 16, 7, 11);
+    R(m, '#ecc070', x0 + 21, B - 25, 6, 9);
+    for (var k = 0; k < 6; k++) { R(m, '#2c5aa8', x0 + 19, B - 25 + k * 2, 2, 1); R(m, '#e8c030', x0 + 19, B - 24 + k * 2, 2, 1); R(m, '#2c5aa8', x0 + 27, B - 25 + k * 2, 2, 1); R(m, '#e8c030', x0 + 27, B - 24 + k * 2, 2, 1); }
+    R(m, '#e8c030', x0 + 19, B - 27, 10, 2); R(m, '#2c5aa8', x0 + 20, B - 27, 8, 1);
+    R(m, '#3a2410', x0 + 25, B - 22, 1, 1); R(m, '#c08c40', x0 + 26, B - 20, 1, 2); R(m, '#a87030', x0 + 24, B - 17, 3, 1); R(m, '#2c5aa8', x0 + 22, B - 16, 4, 3);
+  })();
+  var palm = function (px, base, h, lean) {
+    var i2, top = px + lean;
+    for (i2 = 0; i2 <= h; i2++) R(m, i2 % 3 ? '#8a5a30' : '#6a4220', px + Math.round(lean * i2 * i2 / (h * h)), base - i2, 2, 1);
+    var fr = [[-1, 0.5], [-1, 0.1], [-1, -0.3], [1, 0.5], [1, 0.1], [1, -0.3], [0, 0.9]];
+    fr.forEach(function (f) { for (var t = 0; t < 10; t++) R(m, t % 2 ? '#2f8a3a' : '#4cb048', top + f[0] * t, base - h - f[1] * t + t * t * 0.07, 2, 1); });
+    R(m, '#5a3a20', top - 1, base - h + 1, 2, 2); R(m, '#5a3a20', top + 1, base - h + 1, 2, 2);
+  };
+  wr(function (o) { var mm = m; palm(139 + o, FT, 26, -3); });
+
+  var gr = mk(HW, 31); g = gr.g;
+  R(g, '#e8c070', 0, 3, HW, 28);
+  R(g, '#a87830', 0, 3, HW, 1); R(g, '#fbe9ae', 0, 4, HW, 1); R(g, '#f6d98c', 0, 5, HW, 3); R(g, '#c89840', 0, 8, HW, 1);
+  for (var rowY = 9, row = 0; rowY < 31; rowY += 7, row++) {
+    R(g, '#c89840', 0, rowY, HW, 1);
+    for (x = (row % 2) * 8; x < HW; x += 16) { R(g, '#c89840', x, rowY, 1, 7); }
+    for (x = (row % 2) * 8; x < HW; x += 16) { R(g, '#f2d490', x + 1, rowY + 1, 14, 1); }
+  }
+  for (i = 0; i < 30; i++) R(g, '#d6a850', Math.floor(r() * HW), 10 + Math.floor(r() * 20), 1, 1);
+  for (i = 0; i < 8; i++) { var rx = Math.floor(r() * HW); R(g, '#b89860', rx, 1, 3, 2); R(g, '#d8b878', rx, 1, 2, 1); }
+
+  return {
+    name: 'الصحراء', sub: 'الأهرامات وأبو الهول', accent: '#f6c040',
+    layers: [{ st: 1, c: sky.c }, { c: l0.c, y: 0, sp: 0.03, drift: 5 }, { c: l1.c, y: (GY - 96) * S, sp: 0.1 }, { c: l2.c, y: (GY - 88) * S, sp: 0.25 }],
+    ground: { c: gr.c, y: GROUND_Y - 6, sp: 1 },
+    fxFront: function (ctx, a) {
+      ctx.fillStyle = 'rgba(255,232,170,' + (0.5 * a).toFixed(2) + ')';
+      sand.forEach(function (s) { ctx.fillRect(Math.round(s.x), Math.round(s.y), s.l, 2); });
+    }
+  };
+}
+
+/* =====================================================================
+   العالم 3 : الغابة المظلمة  (أشعة الشمس)
+   ===================================================================== */
+function beamsCanvas(xs, ws) {
+  var o = mk(HW, GY);
+  wr(function (off) {
+    for (var i = 0; i < xs.length; i++) for (var y = 0; y < GY; y += 2) {
+      var a = 0.32 * Math.pow(1 - y / GY, 1.3); if (a < 0.012) break;
+      R(o.g, 'rgba(255,248,190,' + a.toFixed(3) + ')', xs[i] + off + Math.round(y * 0.3), y, ws[i] + Math.round(y * 0.05), 2);
+    }
+  });
+  return o;
+}
+function buildW3() {
+  var r = rng(33), g, i, x, y;
+  var sky = mk(HW, HH); g = sky.g;
+  bands(g, ['#7cc880', '#3f8a5c', '#1c5038', '#0e2c22'], 0, GY, 4);
+  R(g, '#1a3a20', 0, GY, HW, HH - GY);
+  [['rgba(255,255,200,0.10)', 44], ['rgba(255,255,200,0.12)', 32], ['rgba(255,255,210,0.16)', 20], ['rgba(255,255,230,0.30)', 9]].forEach(function (p) { disc(g, p[0], 100, 2, p[1]); });
+
+  var l1 = mk(HW, 170), f = l1.g;
+  var back = [], front = [];
+  for (x = 0; x < HW; x += 10) back.push([x + Math.floor(r() * 4), 70 + Math.floor(r() * 50), 22 + Math.floor(r() * 6)]);
+  for (x = 5; x < HW + 5; x += 13) front.push([x + Math.floor(r() * 4), 80 + Math.floor(r() * 70), 24 + Math.floor(r() * 8)]);
+  wr(function (o) { back.forEach(function (t) { pine(f, t[0] + o, 170, t[1], t[2], '#2c6a4a', '#255a3e'); }); });
+  wr(function (o) { front.forEach(function (t) { pine(f, t[0] + o, 170, t[1], t[2], '#1a4a34', '#123a28'); }); });
+  f.globalCompositeOperation = 'source-atop';
+  for (y = 80; y < 170; y += 4) R(f, 'rgba(150,220,160,' + (((y - 80) / 90) * 0.35).toFixed(2) + ')', 0, y, HW, 4);
+  f.globalCompositeOperation = 'source-over';
+
+  var l2 = mk(HW, GY), m = l2.g;
+  var tr = [[8, 9], [40, 12], [74, 8], [104, 13], [133, 7]];
+  var marks = tr.map(function () { var a = []; for (var k = 0; k < 12; k++) a.push([r(), r(), r()]); return a; });
+  wr(function (o) {
+    tr.forEach(function (t, ti) {
+      var tx = t[0] + o, w = t[1];
+      R(m, '#2b1d12', tx, 0, w, GY); R(m, '#5a4128', tx, 0, 2, GY); R(m, '#140c06', tx + w - 3, 0, 3, GY);
+      marks[ti].forEach(function (mm) { R(m, '#1a1008', tx + 2 + Math.floor(mm[0] * (w - 5)), Math.floor(mm[1] * GY), 1, 6 + Math.floor(mm[2] * 20)); });
+      for (var k = 0; k < 3; k++) { var my = 90 + Math.floor(marks[ti][k][1] * 120); R(m, '#2e6a2c', tx, my, 3, 5); R(m, '#4a8c3a', tx, my, 1, 2); }
+      R(m, '#2b1d12', tx - 3, GY - 4, w + 6, 4); R(m, '#2b1d12', tx - 5, GY - 1, w + 10, 1);
+    });
+  });
+  var bush = [[22, 9], [58, 11], [92, 8], [124, 10]];
+  wr(function (o) { bush.forEach(function (b) { disc(m, '#10341f', b[0] + o, GY - 3, b[1]); disc(m, '#1a4a2c', b[0] + o - 2, GY - 5, b[1] - 2); R(m, '#2a7a3c', b[0] + o - 4, GY - b[1] - 2, 3, 1); }); });
+  var fern = function (fx, fy) { [-1.2, -0.7, -0.25, 0.25, 0.7, 1.2].forEach(function (a) { for (var t = 0; t < 10; t++) R(m, t % 2 ? '#3f9a48' : '#2e7a38', fx + Math.round(Math.sin(a) * t * 1.1), fy - Math.round(Math.cos(a) * t * 0.9 - t * t * 0.03), 2, 1); }); };
+  wr(function (o) { [[5, GY - 4], [48, GY - 3], [84, GY - 4], [118, GY - 3]].forEach(function (p) { fern(p[0] + o, p[1]); }); });
+  wr(function (o) { [30, 100].forEach(function (mx) { var yy = GY - 2, xx = mx + o; R(m, '#e8dcc0', xx, yy - 3, 2, 3); R(m, '#d8402c', xx - 2, yy - 5, 6, 2); R(m, '#d8402c', xx - 1, yy - 6, 4, 1); R(m, '#fff', xx - 1, yy - 5, 1, 1); R(m, '#fff', xx + 2, yy - 5, 1, 1); }); });
+  for (y = 170; y < GY; y += 3) R(m, 'rgba(130,210,150,' + (((y - 170) / 58) * 0.22).toFixed(2) + ')', 0, y, HW, 3);
+
+  var l0 = mk(HW, 44), c = l0.g;
+  var blobs = []; for (x = 0; x <= HW; x += 7) blobs.push([x, 6 + Math.floor(r() * 5)]);
+  var vines = []; for (i = 0; i < 12; i++) vines.push([Math.floor(r() * HW), 8 + Math.floor(r() * 22)]);
+  wr(function (o) {
+    blobs.forEach(function (b) { disc(c, '#0b2a18', b[0] + o, 2, b[1] + 1); });
+    blobs.forEach(function (b) { disc(c, '#123c22', b[0] + o + 1, 0, b[1] - 2); });
+    blobs.forEach(function (b, k) { if (k % 2) R(c, '#2a6a34', b[0] + o - 2, b[1] + 1, 3, 1); });
+    vines.forEach(function (v) { R(c, '#1f5a2c', v[0] + o, 6, 1, v[1]); R(c, '#2f7a3a', v[0] + o + 1, 6 + (v[1] >> 1), 2, 1); R(c, '#2f7a3a', v[0] + o - 1, 6 + v[1], 2, 1); });
+  });
+
+  var bA = beamsCanvas([10, 58, 104], [10, 7, 12]), bB = beamsCanvas([34, 80, 126], [6, 11, 8]);
+
+  var gr = mk(HW, 31); g = gr.g;
+  R(g, '#4a3222', 0, 3, HW, 28);
+  R(g, '#3a7a30', 0, 3, HW, 2); R(g, '#2c5e28', 0, 5, HW, 2); R(g, '#1c3a1c', 0, 7, HW, 2);
+  for (x = 0; x < HW; x += 3) R(g, '#4a9a3c', x, 3, 1, 1);
+  var cc = ['#5e4230', '#2e1c12', '#c8742a', '#a85a20'];
+  for (i = 0; i < 50; i++) R(g, cc[i % 4], Math.floor(r() * HW), 10 + Math.floor(r() * 20), 2, 1);
+  for (i = 0; i < 6; i++) { var rx = Math.floor(r() * HW); R(g, '#2e1c12', rx, 11, 8, 1); R(g, '#2e1c12', rx + 8, 12, 5, 1); }
+  for (i = 0; i < 20; i++) { var gx = Math.floor(r() * HW); R(g, '#2e7a34', gx, 0, 1, 4); R(g, '#3f9a48', gx + 1, 1, 1, 3); }
+
+  return {
+    name: 'الغابة المظلمة', sub: 'أشعة الشمس بين الأشجار', accent: '#58c878',
+    layers: [{ st: 1, c: sky.c }, { c: l1.c, y: (GY - 170) * S, sp: 0.08 }, { c: l2.c, y: 0, sp: 0.3 },
+      { c: bA.c, y: 0, sp: 0.05, pulse: function (t) { return 0.6 + 0.4 * Math.sin(t * 0.9); } },
+      { c: bB.c, y: 0, sp: 0.06, pulse: function (t) { return 0.6 + 0.4 * Math.sin(t * 0.9 + Math.PI); } },
+      { c: l0.c, y: 0, sp: 0.45 }],
+    ground: { c: gr.c, y: GROUND_Y - 6, sp: 1 },
+    fxBack: function (ctx, a) {
+      flies.forEach(function (fl) {
+        var p = 0.5 + 0.5 * Math.sin(time * 2 + fl.p), px = Math.round(fl.x), py = Math.round(fl.y);
+        ctx.globalAlpha = a * 0.16 * p; ctx.fillStyle = '#f4ffa0'; ctx.fillRect(px - 2, py - 2, 6, 6);
+        ctx.globalAlpha = a * (0.5 + 0.5 * p); ctx.fillRect(px, py, 2, 2);
+      });
+      ctx.globalAlpha = 1;
+    }
+  };
+}
+
+/* =====================================================================
+   العالم 4 : الجبال الثلجية والكهف الجليدي
+   ===================================================================== */
+function arch(g, rr, cx, base, ow, oh, iw, ih) {
+  var dy, x;
+  for (dy = 0; dy < oh; dy++) {
+    var half = Math.round(ow * Math.sqrt(1 - (dy / oh) * (dy / oh))), y = base - 1 - dy;
+    R(g, '#a6d8f2', cx - half, y, half, 1); R(g, '#74b0dc', cx, y, half, 1);
+    R(g, '#e8faff', cx - half, y, 1, 1); R(g, '#c4ecfa', cx + half - 1, y, 1, 1);
+  }
+  for (var i = 0; i < 30; i++) {
+    var fx = cx + Math.floor((rr() * 2 - 1) * ow * 0.9), fy = base - 4 - Math.floor(rr() * oh * 0.85);
+    var d2 = base - 1 - fy, hf = ow * Math.sqrt(Math.max(0, 1 - (d2 / oh) * (d2 / oh)));
+    if (Math.abs(fx - cx) < hf - 2) R(g, rr() < 0.5 ? '#d4f2ff' : '#5a98c8', fx, fy, 2 + Math.floor(rr() * 3), 1);
+  }
+  for (dy = 0; dy < ih; dy++) {
+    var h2 = Math.round(iw * Math.sqrt(1 - (dy / ih) * (dy / ih))), y2 = base - 1 - dy;
+    R(g, mix('#14507a', '#051a38', dy / ih), cx - h2, y2, h2 * 2, 1);
+    R(g, '#e0f8ff', cx - h2 - 1, y2, 1, 1); R(g, '#e0f8ff', cx + h2, y2, 1, 1);
+  }
+  for (x = -iw + 3; x <= iw - 3; x += 4) {
+    var topY = base - 1 - Math.round(ih * Math.sqrt(1 - (x / iw) * (x / iw))), len = 3 + (Math.abs(x * 13) % 7);
+    for (var k = 0; k < len; k++) R(g, k % 2 ? '#bfeeff' : '#e8fbff', cx + x, topY + k, k < len * 0.5 ? 2 : 1, 1);
+  }
+  for (i = 0; i < 18; i++) {
+    var sx = cx + Math.floor((rr() * 2 - 1) * (iw - 3)), sy = base - 4 - Math.floor(rr() * (ih - 8));
+    var d3 = base - 1 - sy, h3 = iw * Math.sqrt(Math.max(0, 1 - (d3 / ih) * (d3 / ih)));
+    if (Math.abs(sx - cx) < h3 - 2) R(g, '#9fe8ff', sx, sy, 1, 1);
+  }
+}
+function buildW4() {
+  var r = rng(44), g, i, x, y;
+  var sky = mk(HW, HH); g = sky.g;
+  bands(g, ['#1a2c68', '#3a64b0', '#8cb8e0', '#d4ecfa'], 0, GY, 4);
+  R(g, '#d4ecfa', 0, GY, HW, HH - GY);
+  for (var b = 0; b < 3; b++) for (x = 0; x < HW; x++) {
+    var yy = 28 + b * 14 + Math.round(6 * Math.sin(x / HW * Math.PI * 4 + b));
+    R(g, b % 2 ? 'rgba(184,144,255,0.14)' : 'rgba(120,255,200,0.15)', x, yy, 1, 16);
+  }
+  for (i = 0; i < 30; i++) R(g, 'rgba(255,255,255,' + (0.4 + r() * 0.5).toFixed(2) + ')', Math.floor(r() * HW), Math.floor(r() * 60), 1, 1);
+  disc(g, '#f4f8ff', 118, 40, 6); disc(g, '#dce8fa', 120, 42, 3);
+
+  var l0 = mk(HW, 60);
+  wr(function (o) { cloud(l0.g, 6 + o, 10, 1, '#e6f0ff', '#b8cce8'); cloud(l0.g, 64 + o, 26, 2, '#e6f0ff', '#b8cce8'); });
+
+  var l1 = mk(HW, 170), mg = l1.g;
+  var back = [[16, 130, 40], [66, 150, 46], [118, 124, 38]], front = [[40, 104, 40], [96, 90, 36], [138, 112, 34]];
+  wr(function (o) { back.forEach(function (p, k) { mountain(mg, p[0] + o, 170, p[1], p[2], '#8aa6d6', '#6e8ac0', '#eaf2ff', '#c8d8f0', 0.45, k * 2); }); });
+  wr(function (o) { front.forEach(function (p, k) { mountain(mg, p[0] + o, 170, p[1], p[2], '#a6c0e6', '#8aa6d2', '#ffffff', '#d6e6fa', 0.42, k * 3 + 1); }); });
+
+  var l2 = mk(HW, 110), m = l2.g;
+  wr(function (o) {
+    arch(m, rng(5), 40 + o, 110, 34, 70, 22, 52);
+    arch(m, rng(6), 116 + o, 110, 22, 44, 13, 30);
+    pine(m, 87 + o, 108, 34, 18, '#2a6a58', '#1e4e40', ['#ffffff', '#d6e8f6']);
+    pine(m, 142 + o, 108, 26, 14, '#2a6a58', '#1e4e40', ['#ffffff', '#d6e8f6']);
+  });
+  for (x = 0; x < HW; x++) {
+    var top = 106 - Math.round(3 + 3 * Math.sin(x / HW * Math.PI * 2 * 3) + 2 * Math.sin(x / HW * Math.PI * 2 * 7));
+    R(m, '#ffffff', x, top, 1, 110 - top); R(m, '#cfe2f6', x, top + 3, 1, 110 - top - 3);
+  }
+
+  var ce = mk(HW, 44), c = ce.g;
+  var ic = []; for (x = 0; x < HW; x += 5 + Math.floor(r() * 4)) ic.push([x, 6 + Math.floor(r() * 26), 2 + Math.floor(r() * 3)]);
+  wr(function (o) {
+    R(c, '#9ad0f0', 0, 0, HW, 3); R(c, '#cdeeff', 0, 0, HW, 1);
+    ic.forEach(function (t) {
+      for (var k = 0; k < t[1]; k++) { var w = Math.max(1, Math.round(t[2] * (1 - k / t[1]))); R(c, '#cdeeff', t[0] + o, 3 + k, w >> 1 || 1, 1); R(c, '#8fc8ec', t[0] + o + (w >> 1 || 1), 3 + k, w - (w >> 1 || 1), 1); }
+    });
+  });
+
+  var gr = mk(HW, 31); g = gr.g;
+  R(g, '#7ab8e0', 0, 3, HW, 28);
+  R(g, '#ffffff', 0, 3, HW, 3); R(g, '#dbeeff', 0, 6, HW, 1); R(g, '#c8def4', 0, 7, HW, 1); R(g, '#a8d0ec', 0, 8, HW, 2);
+  for (var rowY = 12; rowY < 31; rowY += 8) { R(g, '#5a98c8', 0, rowY, HW, 1); for (x = ((rowY / 8) | 0) % 2 * 9; x < HW; x += 18) R(g, '#5a98c8', x, rowY, 1, 8); }
+  for (i = 0; i < 26; i++) R(g, '#d8f4ff', Math.floor(r() * HW), 10 + Math.floor(r() * 20), 1, 1);
+  for (i = 0; i < 14; i++) { var bx = Math.floor(r() * HW); R(g, '#ffffff', bx, 1, 4, 2); R(g, '#ffffff', bx + 1, 0, 2, 1); }
+
+  return {
+    name: 'الجبال الثلجية', sub: 'قمم عالية وكهف جليدي', accent: '#8ad8ff',
+    layers: [{ st: 1, c: sky.c }, { c: l0.c, y: 0, sp: 0.03, drift: 4 }, { c: l1.c, y: (GY - 170) * S, sp: 0.08 }, { c: l2.c, y: (GY - 110) * S, sp: 0.25 }, { c: ce.c, y: 0, sp: 0.4 }],
+    ground: { c: gr.c, y: GROUND_Y - 6, sp: 1 },
+    fxFront: function (ctx, a) {
+      ctx.fillStyle = 'rgba(255,255,255,' + (0.9 * a).toFixed(2) + ')';
+      snow.forEach(function (s) { ctx.fillRect(Math.round(s.x), Math.round(s.y), s.z, s.z); });
+    }
+  };
+}
+
+/* =====================================================================
+   الأنابيب (تتغير مع كل عالم)
+   ===================================================================== */
+function segs(g, x0, y0, h, list) { var x = x0; for (var i = 0; i < list.length; i++) { R(g, list[i][0], x, y0, list[i][1], h); x += list[i][1]; } }
+function makePipe(d) {
+  var body = mk(26, 16); segs(body.g, 0, 0, 16, d.body); if (d.bodyFx) d.bodyFx(body.g);
+  var capU = mk(30, 16), capD = mk(30, 16);
+  [[capU, 4], [capD, 0]].forEach(function (p) {
+    var g = p[0].g, y0 = p[1];
+    segs(g, 0, y0, 12, d.cap); R(g, d.out, 0, y0, 30, 1); R(g, d.out, 0, y0 + 11, 30, 1);
+    R(g, 'rgba(255,255,255,0.26)', 1, y0 + 1, 28, 1); R(g, 'rgba(0,0,0,0.26)', 1, y0 + 10, 28, 1);
+    if (d.capFx) d.capFx(g, y0);
+  });
+  d.decoU(capU.g); d.decoD(capD.g);
+  return { body: body.c, capU: capU.c, capD: capD.c };
+}
+function teeth(g, xs, y, len, col, col2) { xs.forEach(function (x) { for (var r = 0; r < len; r++) { var w = Math.max(1, 3 - r); R(g, col, x + ((3 - w) >> 1), y + r, w, 1); if (w > 1) R(g, col2, x + w - 1 + ((3 - w) >> 1), y + r, 1, 1); } }); }
+function pipeDefs() {
+  return [
+    { // أخضر + أعشاب
+      out: '#1f4a14',
+      body: [['#1f4a14', 1], ['#3a8a1c', 2], ['#58b82a', 4], ['#9ae85a', 3], ['#7ed040', 3], ['#58b82a', 5], ['#3a8a1c', 3], ['#2a6a14', 4], ['#1f4a14', 1]],
+      cap: [['#1f4a14', 1], ['#3a8a1c', 2], ['#58b82a', 5], ['#9ae85a', 3], ['#7ed040', 4], ['#58b82a', 6], ['#3a8a1c', 4], ['#2a6a14', 4], ['#1f4a14', 1]],
+      bodyFx: function (g) { for (var y = 0; y < 16; y++) R(g, '#256012', 17 + Math.round(2 * Math.sin(y / 16 * Math.PI * 2)), y, 1, 1); R(g, '#8ae850', 19, 3, 2, 1); R(g, '#8ae850', 15, 11, 2, 1); },
+      decoU: function (g) { var xs = [2, 5, 7, 11, 15, 18, 22, 25, 27], hs = [3, 2, 4, 2, 3, 4, 2, 3, 2]; xs.forEach(function (x, i) { R(g, '#3e9a28', x, 4 - hs[i], 1, hs[i]); R(g, '#8ae850', x + 1, 5 - hs[i], 1, hs[i] - 1); }); },
+      decoD: function (g) { [3, 9, 16, 22, 27].forEach(function (x, i) { var l = 2 + (i % 2); R(g, '#3a8a28', x, 12, 1, l); R(g, '#8ae850', x - 1, 12 + l, 3, 1); }); }
+    },
+    { // حجر رملي
+      out: '#4a300e',
+      body: [['#4a300e', 1], ['#9a6a28', 2], ['#c89440', 5], ['#f0cc78', 6], ['#d8a850', 4], ['#b88030', 3], ['#8a5a20', 4], ['#4a300e', 1]],
+      cap: [['#4a300e', 1], ['#9a6a28', 3], ['#c89440', 6], ['#f0cc78', 7], ['#d8a850', 5], ['#b88030', 4], ['#8a5a20', 3], ['#4a300e', 1]],
+      bodyFx: function (g) {
+        R(g, '#7a521c', 1, 7, 24, 1); R(g, '#7a521c', 1, 15, 24, 1); R(g, '#7a521c', 13, 0, 1, 7); R(g, '#7a521c', 6, 8, 1, 7); R(g, '#7a521c', 19, 8, 1, 7);
+        R(g, '#6a4414', 9, 3, 2, 2); R(g, '#6a4414', 14, 2, 1, 4); R(g, '#6a4414', 16, 4, 3, 1); R(g, '#6a4414', 8, 11, 1, 3); R(g, '#6a4414', 10, 12, 3, 1); R(g, '#6a4414', 15, 10, 2, 2);
+      },
+      capFx: function (g, y0) { R(g, '#f6d860', 1, y0 + 3, 28, 1); R(g, '#a87820', 1, y0 + 4, 28, 1); R(g, '#f6d860', 1, y0 + 7, 28, 1); R(g, '#a87820', 1, y0 + 8, 28, 1); },
+      decoU: function (g) { R(g, '#4a300e', 6, 0, 18, 1); R(g, '#e8c070', 6, 1, 18, 1); R(g, '#4a300e', 2, 2, 26, 1); R(g, '#d8a850', 2, 3, 26, 1); R(g, '#f6d860', 14, 1, 2, 1); },
+      decoD: function (g) { teeth(g, [3, 9, 15, 21, 26], 12, 4, '#c89440', '#8a5a20'); }
+    },
+    { // جذوع أشجار
+      out: '#1a0e08',
+      body: [['#1a0e08', 1], ['#3a2414', 3], ['#5a3a20', 5], ['#7a5230', 4], ['#5a3a20', 4], ['#44281a', 5], ['#2e1a0e', 3], ['#1a0e08', 1]],
+      cap: [['#1a0e08', 1], ['#3a2414', 4], ['#5a3a20', 6], ['#7a5230', 5], ['#5a3a20', 6], ['#44281a', 5], ['#2e1a0e', 2], ['#1a0e08', 1]],
+      bodyFx: function (g) {
+        [[5, 1, 7], [9, 8, 7], [12, 0, 5], [16, 6, 9], [20, 2, 6], [22, 10, 5], [7, 11, 4]].forEach(function (a) { R(g, '#24140a', a[0], a[1], 1, a[2]); });
+        [[8, 3, 5], [14, 9, 5], [18, 12, 3]].forEach(function (a) { R(g, '#8a6038', a[0], a[1], 1, a[2]); });
+        R(g, '#24140a', 14, 5, 4, 5); R(g, '#4a2e18', 15, 6, 2, 3); R(g, '#3a7a30', 1, 10, 4, 3); R(g, '#58a048', 1, 10, 2, 1);
+      },
+      capFx: function (g, y0) { R(g, '#c89a60', 6, y0 + 4, 3, 3); R(g, '#7a5230', 7, y0 + 5, 1, 1); R(g, '#c89a60', 21, y0 + 6, 3, 3); R(g, '#7a5230', 22, y0 + 7, 1, 1); },
+      decoU: function (g) { var hs = [2, 3, 1, 4, 2, 3, 1, 3, 2, 4, 2, 3]; for (var i = 0; i < hs.length; i++) { var x = 1 + i * 2.4 | 0; R(g, '#8a6038', x, 4 - hs[i], 2, hs[i]); R(g, '#d8b078', x, 4 - hs[i], 1, 1); } R(g, '#3a7a30', 4, 3, 5, 1); R(g, '#58a048', 16, 3, 4, 1); },
+      decoD: function (g) { var hs = [2, 3, 1, 4, 2, 3, 2, 3]; for (var i = 0; i < hs.length; i++) { var x = 2 + i * 3.4 | 0; R(g, '#8a6038', x, 12, 2, hs[i]); R(g, '#d8b078', x, 11 + hs[i], 1, 1); } [5, 14, 23].forEach(function (x) { R(g, '#2f6a2a', x, 12, 1, 3); R(g, '#58a048', x - 1, 15, 3, 1); }); }
+    },
+    { // ثلج وصقيع
+      out: '#0e3a4a',
+      body: [['#0e3a4a', 1], ['#1f7a8a', 2], ['#3ab0b8', 4], ['#b0f4f4', 3], ['#80dede', 3], ['#3ab0b8', 5], ['#1f7a8a', 3], ['#155a6a', 4], ['#0e3a4a', 1]],
+      cap: [['#0e3a4a', 1], ['#1f7a8a', 2], ['#3ab0b8', 5], ['#b0f4f4', 3], ['#80dede', 4], ['#3ab0b8', 6], ['#1f7a8a', 4], ['#155a6a', 4], ['#0e3a4a', 1]],
+      bodyFx: function (g) {
+        var q = rng(9); for (var i = 0; i < 22; i++) R(g, '#e8fcff', 2 + Math.floor(q() * 22), Math.floor(q() * 16), 1, 1);
+        R(g, '#f4feff', 1, 2, 2, 3); R(g, '#f4feff', 1, 9, 2, 4); R(g, '#d8f8ff', 21, 5, 1, 5); R(g, '#d8f8ff', 4, 12, 1, 4); R(g, '#f4feff', 23, 12, 2, 2);
+      },
+      capFx: function (g, y0) { R(g, '#f4feff', 3, y0 + 1, 10, 1); R(g, '#f4feff', 18, y0 + 1, 8, 1); R(g, '#f4feff', 2, y0 + 9, 6, 1); R(g, '#f4feff', 20, y0 + 9, 7, 1); },
+      decoU: function (g) { R(g, '#c4def4', 1, 3, 28, 1); R(g, '#e6f4ff', 2, 2, 26, 1); R(g, '#ffffff', 4, 1, 22, 1); R(g, '#ffffff', 9, 0, 12, 1); R(g, '#c4def4', 6, 2, 3, 1); R(g, '#c4def4', 20, 2, 4, 1); },
+      decoD: function (g) { var xs = [3, 8, 13, 19, 24], ls = [4, 3, 4, 2, 3]; xs.forEach(function (x, i) { for (var r = 0; r < ls[i]; r++) { var w = Math.max(1, 3 - Math.floor(r * 3 / ls[i])); R(g, '#f4feff', x, 12 + r, 1, 1); if (w > 1) R(g, '#9ad4f0', x + 1, 12 + r, w - 1, 1); } }); }
+    }
+  ];
+}
+
+/* =====================================================================
+   الطائر (Pixel Art)
+   ===================================================================== */
+var BIRD_GRID = [
+  '.....KKKKKK......',
+  '...KKLLLLLYKEEEK.',
+  '..KLLLLLYYYKEEEEK',
+  '.KLLLLYYYYYKEEPEK',
+  '.KLYYYYYYYYKEEEEK',
+  '.KYYYYYYYYYYKRRRK',
+  '.KYYYYYYYYYYKKKKK',
+  '..KYYYYYYYYYYKRRK',
+  '..KKOOOYYYYYYKKK.',
+  '...KKOOOOOOOKK...',
+  '.....KKKKKKK.....'
+];
+var BIRD_PAL = { K: '#2a1c14', L: '#fff58a', Y: '#ffcf2b', O: '#f29a1c', E: '#ffffff', P: '#2a1c14', R: '#f2542d' };
+function makeBird() {
+  var o = mk(17, 11);
+  for (var y = 0; y < BIRD_GRID.length; y++) for (var x = 0; x < BIRD_GRID[y].length; x++) { var ch = BIRD_GRID[y][x]; if (ch !== '.' && BIRD_PAL[ch]) R(o.g, BIRD_PAL[ch], x, y, 1, 1); }
+  return o.c;
+}
+
+/* =====================================================================
+   الصوت (Web Audio API الأصلي فقط)
+   ===================================================================== */
+var Snd = (function () {
+  var ac = null, master = null, nb = null, muted = false;
+  try { muted = localStorage.getItem('fb4w_mute') === '1'; } catch (e) {}
+  function init() {
+    if (ac) return;
+    var AC = window.AudioContext || window.webkitAudioContext; if (!AC) return;
+    try {
+      ac = new AC(); master = ac.createGain(); master.gain.value = 0.55;
+      var comp = ac.createDynamicsCompressor(); master.connect(comp); comp.connect(ac.destination);
+      var len = Math.floor(ac.sampleRate * 0.5); nb = ac.createBuffer(1, len, ac.sampleRate);
+      var d = nb.getChannelData(0); for (var i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    } catch (e) { ac = null; }
+  }
+  function unlock() { init(); if (ac && ac.state === 'suspended') { try { var p = ac.resume(); if (p && p.catch) p.catch(function () {}); } catch (e) {} } }
+  function tone(f, d, type, v, slide, delay) {
+    if (!ac || muted) return;
+    try {
+      var t = ac.currentTime + (delay || 0), o = ac.createOscillator(), g = ac.createGain();
+      o.type = type || 'square'; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + d);
+      g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v || 0.1, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      o.connect(g); g.connect(master); o.start(t); o.stop(t + d + 0.05);
+    } catch (e) {}
+  }
+  function noise(d, v, f0, f1, delay) {
+    if (!ac || muted || !nb) return;
+    try {
+      var t = ac.currentTime + (delay || 0), s = ac.createBufferSource(), fl = ac.createBiquadFilter(), g = ac.createGain();
+      s.buffer = nb; fl.type = 'lowpass'; fl.frequency.setValueAtTime(f0, t); fl.frequency.exponentialRampToValueAtTime(f1, t + d);
+      g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      s.connect(fl); fl.connect(g); g.connect(master); s.start(t); s.stop(t + d + 0.05);
+    } catch (e) {}
+  }
+  return {
+    unlock: unlock,
+    muted: function () { return muted; },
+    toggle: function () { muted = !muted; try { localStorage.setItem('fb4w_mute', muted ? '1' : '0'); } catch (e) {} if (!muted) { unlock(); tone(660, 0.08, 'square', 0.08); } },
+    flap: function () { tone(380, 0.11, 'triangle', 0.18, 720); noise(0.05, 0.05, 4000, 1500); },
+    score: function () { tone(880, 0.08, 'square', 0.09); tone(1320, 0.16, 'square', 0.09, null, 0.07); },
+    hit: function () { noise(0.25, 0.4, 2600, 200); tone(220, 0.22, 'sawtooth', 0.16, 70); },
+    die: function () { tone(520, 0.5, 'triangle', 0.14, 110, 0.12); },
+    world: function () { [523, 659, 784, 1047, 1319].forEach(function (f, i) { tone(f, 0.18, 'square', 0.06, null, 0.1 + i * 0.09); tone(f / 2, 0.2, 'triangle', 0.08, null, 0.1 + i * 0.09); }); }
+  };
+})();
+
+/* =====================================================================
+   الحالة العامة
+   ===================================================================== */
+var cv = document.getElementById('c'), ctx = cv.getContext('2d', { alpha: false });
+var STATE = { READY: 0, PLAY: 1, DYING: 2, OVER: 3 };
+var state = STATE.READY, score = 0, best = 0, newBest = false;
+try { best = parseInt(localStorage.getItem('fb4w_best'), 10) || 0; } catch (e) {}
+var bird = { x: BIRD_X, y: 250, vy: 0, ang: 0, wing: 0 };
+var pipes = [], lastC = null, dist = 0, time = 0;
+var curWorld = START, trans = null, banner = null;
+var flash = 0, shake = 0, pop = 0, overT = 0;
+var worlds, pipeSpr, birdImg;
+var ACC = ['#7be04a', '#f6c040', '#58c878', '#8ad8ff'];
+var ORD = ['الأول', 'الثاني', 'الثالث', 'الرابع'];
+
+var rr = rng(7);
+var birds = [], sand = [], flies = [], snow = [], i0;
+for (i0 = 0; i0 < 5; i0++) birds.push({ x: rr() * W, y: 50 + rr() * 130, v: 8 + rr() * 10, w: rr() * 4 });
+for (i0 = 0; i0 < 22; i0++) sand.push({ x: rr() * W, y: 240 + rr() * 200, l: 6 + Math.floor(rr() * 10), v: 60 + rr() * 60 });
+for (i0 = 0; i0 < 18; i0++) flies.push({ x: rr() * W, y: 120 + rr() * 300, p: rr() * 6.28, s: 0.4 + rr() * 0.6 });
+for (i0 = 0; i0 < 70; i0++) snow.push({ x: rr() * W, y: rr() * H, v: 25 + rr() * 35, p: rr() * 6.28, z: rr() < 0.35 ? 3 : 2 });
+
+function worldOf(sc) { return (START + Math.floor(sc / POINTS_PER_WORLD)) % 4; }
+function curSpeed() { return 118 + Math.min(42, score); }
+function scrollSpeed() { return state === STATE.READY ? 55 : state === STATE.PLAY ? curSpeed() : 0; }
+function curGap() { return Math.max(108, 128 - score * 0.35); }
+
+function fxUpdate(dt) {
+  var sp = scrollSpeed();
+  birds.forEach(function (b) { b.x -= b.v * dt; b.w += dt * 7; if (b.x < -12) { b.x = W + 10 + rr() * 60; b.y = 50 + rr() * 130; } });
+  sand.forEach(function (s) { s.x -= (s.v + sp * 1.3) * dt; if (s.x < -20) { s.x = W + 10 + rr() * 40; s.y = 240 + rr() * 200; } });
+  flies.forEach(function (f) {
+    f.x += Math.cos(time * f.s + f.p) * 12 * dt - sp * 0.15 * dt; f.y += Math.sin(time * 0.8 * f.s + f.p) * 10 * dt;
+    if (f.x < -6) f.x = W + 6; if (f.x > W + 6) f.x = -6; f.y = clamp(f.y, 60, GROUND_Y - 20);
+  });
+  snow.forEach(function (s) {
+    s.y += s.v * dt; s.x += Math.sin(time * 1.3 + s.p) * 14 * dt - (sp * 0.25 + 8) * dt;
+    if (s.y > GROUND_Y) { s.y = -4; s.x = rr() * W; } if (s.x < -4) s.x = W + 4;
+  });
+}
+
+/* =====================================================================
+   منطق اللعبة
+   ===================================================================== */
+function spawnPipe() {
+  var gap = Math.round(curGap() / 2) * 2, minC = 80 + gap / 2, maxC = GROUND_Y - 80 - gap / 2, c;
+  if (lastC === null) c = (minC + maxC) / 2;
+  else { var lo = Math.max(minC, lastC - 130), hi = Math.min(maxC, lastC + 130); c = lo + Math.random() * (hi - lo); }
+  c = Math.round(c / 2) * 2; lastC = c;
+  pipes.push({ x: W + 60, top: c - gap / 2, bot: c + gap / 2, passed: false });
+}
+function circRect(cx, cy, r, x, y, w, h) { var nx = clamp(cx, x, x + w), ny = clamp(cy, y, y + h), dx = cx - nx, dy = cy - ny; return dx * dx + dy * dy < r * r; }
+function hitPipe(p) {
+  var r = 8.5, x = bird.x, y = bird.y;
+  return circRect(x, y, r, p.x - 26, -200, 52, p.top - CAP_H + 200) || circRect(x, y, r, p.x - 30, p.top - CAP_H, 60, CAP_H) ||
+         circRect(x, y, r, p.x - 30, p.bot, 60, CAP_H) || circRect(x, y, r, p.x - 26, p.bot + CAP_H, 52, H);
+}
+function flap() { bird.vy = -FLAP; Snd.flap(); }
+function startPlay() { state = STATE.PLAY; pipes = []; lastC = null; banner = { t: 0, dur: 3, world: curWorld }; flap(); }
+function resetToReady() {
+  score = 0; newBest = false; pipes = []; lastC = null; bird.y = 250; bird.vy = 0; bird.ang = 0; banner = null; state = STATE.READY; overT = 0;
+  if (curWorld !== START) { trans = { from: curWorld, to: START, t: 0 }; curWorld = START; }
+}
+function addScore() {
+  score++; pop = 1; Snd.score();
+  var nw = worldOf(score);
+  if (nw !== curWorld) { trans = { from: curWorld, to: nw, t: 0 }; curWorld = nw; banner = { t: 0, dur: 3, world: nw }; flash = Math.max(flash, 0.5); Snd.world(); }
+}
+function crash(pipeHit) {
+  Snd.hit(); flash = 0.9; shake = 1; banner = null;
+  if (score > best) { best = score; newBest = true; try { localStorage.setItem('fb4w_best', String(best)); } catch (e) {} }
+  if (pipeHit) { state = STATE.DYING; if (bird.vy < 0) bird.vy = 0; Snd.die(); }
+  else { state = STATE.OVER; overT = 0; Snd.die(); }
+}
+function stepPlay(h) {
+  bird.vy += GRAV * h; if (bird.vy > MAX_FALL) bird.vy = MAX_FALL;
+  bird.y += bird.vy * h;
+  if (bird.y < 10) { bird.y = 10; if (bird.vy < 0) bird.vy = 0; }
+  var sp = curSpeed(); dist += sp * h;
+  for (var i = 0; i < pipes.length; i++) pipes[i].x -= sp * h;
+  if (pipes.length && pipes[0].x < -40) pipes.shift();
+  var lp = pipes[pipes.length - 1];
+  if (!lp || lp.x <= W + 60 - PIPE_SPACING) spawnPipe();
+  for (i = 0; i < pipes.length; i++) {
+    var p = pipes[i];
+    if (!p.passed && p.x < bird.x) { p.passed = true; addScore(); }
+    if (Math.abs(p.x - bird.x) < 50 && hitPipe(p)) { crash(true); return; }
+  }
+  if (bird.y + 8 >= GROUND_Y) { bird.y = GROUND_Y - 8; crash(false); }
+}
+function update(dt) {
+  time += dt;
+  if (trans) { trans.t += dt / TRANS_T; if (trans.t >= 1) trans = null; }
+  if (banner) { banner.t += dt; if (banner.t >= banner.dur) banner = null; }
+  if (flash > 0) flash = Math.max(0, flash - dt * 2.5);
+  if (shake > 0) shake = Math.max(0, shake - dt * 3);
+  if (pop > 0) pop = Math.max(0, pop - dt * 4);
+  fxUpdate(dt);
+  var target = 0;
+  if (state === STATE.READY) {
+    dist += 55 * dt; bird.y = 250 + Math.sin(time * 4.5) * 7; bird.vy = 0; target = Math.sin(time * 4.5) * 0.08; bird.wing += dt * 9;
+  } else if (state === STATE.PLAY) {
+    var rem = dt;
+    while (rem > 0 && state === STATE.PLAY) { var h = Math.min(rem, 1 / 120); rem -= h; stepPlay(h); }
+    target = clamp(bird.vy / 380 * 0.9, -0.45, 1.35); bird.wing += dt * (bird.vy < 0 ? 18 : 8);
+  } else if (state === STATE.DYING) {
+    bird.vy += GRAV * dt; if (bird.vy > MAX_FALL) bird.vy = MAX_FALL; bird.y += bird.vy * dt; target = 1.5;
+    if (bird.y >= GROUND_Y - 8) { bird.y = GROUND_Y - 8; state = STATE.OVER; overT = 0; }
+  } else { overT += dt; target = 1.5; }
+  bird.ang += (target - bird.ang) * Math.min(1, dt * 10);
+}
+
+/* =====================================================================
+   الرسم
+   ===================================================================== */
+function drawScroll(L, off, alpha) {
+  var x = -(Math.floor(off) % W), h = L.c.height * S;
+  ctx.globalAlpha = alpha; ctx.drawImage(L.c, x, L.y, W, h); ctx.drawImage(L.c, x + W, L.y, W, h);
+}
+function drawBackdrop(w, alpha) {
+  for (var i = 0; i < w.layers.length; i++) {
+    var L = w.layers[i];
+    if (L.st) { ctx.globalAlpha = alpha; ctx.drawImage(L.c, 0, 0, W, H); continue; }
+    drawScroll(L, dist * L.sp + (L.drift ? time * L.drift : 0), alpha * (L.pulse ? L.pulse(time) : 1));
+  }
+  if (w.fxBack) w.fxBack(ctx, alpha);
+  ctx.globalAlpha = 1;
+}
+function drawGround(w, alpha) { drawScroll(w.ground, dist, alpha); ctx.globalAlpha = 1; }
+function tileBody(img, x, y, h) {
+  y = Math.round(y);
+  while (h > 0) { var hh = Math.min(32, h); ctx.drawImage(img, 0, 0, 26, hh / 2, x, y, 52, hh); y += hh; h -= hh; }
+}
+function drawPipes(wi, alpha) {
+  var s = pipeSpr[wi]; ctx.globalAlpha = alpha;
+  for (var i = 0; i < pipes.length; i++) {
+    var p = pipes[i], gx = Math.round(p.x);
+    if (gx < -40 || gx > W + 40) continue;
+    var th = p.top - CAP_H; if (th > 0) tileBody(s.body, gx - 26, 0, th);
+    ctx.drawImage(s.capD, 0, 0, 30, 16, gx - 30, p.top - CAP_H, 60, 32);
+    ctx.drawImage(s.capU, 0, 0, 30, 16, gx - 30, p.bot - 8, 60, 32);
+    tileBody(s.body, gx - 26, p.bot + CAP_H, H - (p.bot + CAP_H));
+  }
+  ctx.globalAlpha = 1;
+}
+function drawBird() {
+  var x = Math.round(bird.x), y = Math.round(bird.y);
+  ctx.save(); ctx.translate(x, y); ctx.rotate(bird.ang);
+  ctx.drawImage(birdImg, -17, -11, 34, 22);
+  var f = [0, 1, 2, 1][Math.floor(bird.wing) % 4], wy = [2, 4, 6][f];
+  function P(gx, gy, gw, gh, col) { ctx.fillStyle = col; ctx.fillRect(-17 + gx * 2, -11 + gy * 2, gw * 2, gh * 2); }
+  P(2, wy, 7, 4, '#2a1c14'); P(3, wy + 1, 5, 1, '#fff8d0'); P(3, wy + 2, 5, 1, '#f0b040');
+  ctx.restore();
+}
+var DIG = {
+  '0': ['111', '101', '101', '101', '111'], '1': ['010', '110', '010', '010', '111'], '2': ['111', '001', '111', '100', '111'],
+  '3': ['111', '001', '111', '001', '111'], '4': ['101', '101', '111', '001', '001'], '5': ['111', '100', '111', '001', '111'],
+  '6': ['111', '100', '111', '101', '111'], '7': ['111', '001', '010', '010', '010'], '8': ['111', '101', '111', '101', '111'],
+  '9': ['111', '101', '111', '001', '111']
+};
+function drawNum(str, cx, y, s, fill, out) {
+  var n = str.length, tw = n * 3 * s + (n - 1) * s, x0 = Math.round(cx - tw / 2), o = Math.max(1, Math.round(s / 2.5));
+  for (var pass = 0; pass < 2; pass++) {
+    ctx.fillStyle = pass ? fill : out;
+    for (var i = 0; i < n; i++) {
+      var d = DIG[str.charAt(i)]; if (!d) continue; var bx = x0 + i * 4 * s;
+      for (var r = 0; r < 5; r++) for (var c = 0; c < 3; c++) {
+        if (d[r].charAt(c) !== '1') continue;
+        if (pass) ctx.fillRect(bx + c * s, y + r * s, s, s); else ctx.fillRect(bx + c * s - o, y + r * s - o, s + 2 * o, s + 2 * o);
+      }
+    }
+  }
+}
+var FAM = 'Tahoma,"Segoe UI","Noto Sans Arabic",Arial,sans-serif';
+function txt(s, x, y, size, fill, stroke, align, fam) {
+  ctx.font = 'bold ' + size + 'px ' + (fam || FAM); ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  try { ctx.direction = /[\u0600-\u06FF]/.test(s) ? 'rtl' : 'ltr'; } catch (e) {}
+  if (stroke) { ctx.lineWidth = Math.max(2, size / 5); ctx.lineJoin = 'round'; ctx.strokeStyle = stroke; ctx.strokeText(s, x, y); }
+  ctx.fillStyle = fill; ctx.fillText(s, x, y);
+}
+function medal(cx, cy, tier) {
+  var pal = [['#6a6a78', '#4a4a58'], ['#d8884a', '#8a4a20'], ['#e4e8f4', '#8a90a8'], ['#ffd848', '#c08810'], ['#b0f4ff', '#3a9cd0']][tier];
+  disc(ctx, pal[1], cx, cy, 22); disc(ctx, pal[0], cx, cy, 18); disc(ctx, pal[1], cx, cy, 13); disc(ctx, pal[0], cx, cy, 11);
+  if (tier > 0) {
+    var star = ['00100', '01110', '11111', '01110', '11011'];
+    ctx.fillStyle = pal[1]; for (var r = 0; r < 5; r++) for (var c = 0; c < 5; c++) if (star[r].charAt(c) === '1') ctx.fillRect(cx - 7 + c * 3, cy - 7 + r * 3, 3, 3);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.fillRect(cx - 14, cy - 12, 3, 3);
+  }
+}
+function drawMute() {
+  var x = W - 34, y = 8; R(ctx, 'rgba(0,0,0,0.35)', x, y, 26, 26);
+  ctx.fillStyle = '#fff'; ctx.fillRect(x + 5, y + 10, 4, 6); ctx.fillRect(x + 9, y + 8, 3, 10); ctx.fillRect(x + 12, y + 6, 3, 14);
+  if (!Snd.muted()) { ctx.fillRect(x + 17, y + 10, 2, 6); ctx.fillRect(x + 20, y + 8, 2, 10); }
+  else { ctx.fillStyle = '#ff5a4a'; for (var k = 0; k < 6; k++) { ctx.fillRect(x + 16 + k, y + 9 + k, 2, 2); ctx.fillRect(x + 21 - k, y + 9 + k, 2, 2); } }
+}
+function drawBanner() {
+  if (!banner) return;
+  var t = banner.t, a = 1, oy = 0;
+  if (t < 0.35) { var k = t / 0.35; a = k; oy = (1 - k) * -30; } else if (t > banner.dur - 0.6) a = Math.max(0, (banner.dur - t) / 0.6);
+  var w = worlds[banner.world];
+  ctx.save(); ctx.globalAlpha = a; ctx.translate(0, oy);
+  var x = 26, y = 104, bw = W - 52, bh = 64;
+  R(ctx, 'rgba(0,0,0,0.6)', x, y, bw, bh); R(ctx, w.accent, x, y, bw, 3); R(ctx, w.accent, x, y + bh - 3, bw, 3);
+  txt('العالم ' + ORD[banner.world], W / 2, y + 23, 22, w.accent, '#102030');
+  txt(w.name + ' • ' + w.sub, W / 2, y + 46, 14, '#ffffff', '#102030');
+  ctx.restore();
+}
+function drawHUD() {
+  drawMute();
+  txt('الأفضل ' + best, 10, 20, 13, '#fff', '#203040', 'left');
+  if (state === STATE.PLAY || state === STATE.DYING) {
+    var s = pop > 0.5 ? 6 : 5;
+    drawNum(String(score), W / 2, 34, s, '#ffffff', '#2a1c14');
+    var wi = curWorld, f = (score % POINTS_PER_WORLD) / POINTS_PER_WORLD;
+    R(ctx, 'rgba(0,0,0,0.5)', W / 2 - 41, 72, 82, 8); R(ctx, ACC[wi], W / 2 - 39, 74, Math.round(78 * f), 4);
+  }
+  drawBanner();
+}
+function drawReady() {
+  txt('FLAPPY', W / 2, 118, 46, '#ffd23a', '#5a2a0c', 'center', 'Impact,"Arial Black",Arial,sans-serif');
+  txt('BIRD', W / 2, 162, 46, '#ff8a2a', '#5a2a0c', 'center', 'Impact,"Arial Black",Arial,sans-serif');
+  txt('رحلة عبر 4 عوالم', W / 2, 202, 17, '#ffffff', '#1a3050');
+  for (var i = 0; i < 4; i++) { var bx = W / 2 - 46 + i * 24; R(ctx, '#102030', bx - 2, 224, 18, 18); R(ctx, ACC[i], bx, 226, 14, 14); }
+  var a = 0.65 + 0.35 * Math.sin(time * 4);
+  ctx.globalAlpha = a; txt('المس الشاشة للطيران', W / 2, 336, 20, '#ffffff', '#1a3050'); ctx.globalAlpha = 1;
+  txt('أو اضغط Space', W / 2, 362, 14, '#ffffff', '#1a3050');
+}
+function drawOver() {
+  var k = Math.min(1, overT / 0.4), e = 1 - Math.pow(1 - k, 3);
+  ctx.save(); ctx.globalAlpha = e; ctx.translate(0, (1 - e) * 50);
+  txt('انتهت اللعبة', W / 2, 108, 32, '#ffffff', '#b8321e');
+  var px = 34, py = 140, pw = 220, ph = 150;
+  R(ctx, '#3a2412', px, py, pw, ph); R(ctx, '#f2e4b2', px + 3, py + 3, pw - 6, ph - 6); R(ctx, '#dcc78c', px + 3, py + ph - 12, pw - 6, 9); R(ctx, '#c9aa66', px + 3, py + 3, pw - 6, 2);
+  txt('النتيجة', px + pw - 18, py + 22, 15, '#b0602a', null, 'right');
+  txt('الأفضل', px + pw - 18, py + 84, 15, '#b0602a', null, 'right');
+  var shown = Math.min(score, Math.floor(overT / 0.6 * score + 0.01));
+  drawNum(String(shown), px + pw - 62, py + 36, 4, '#ffffff', '#3a2412');
+  drawNum(String(best), px + pw - 62, py + 98, 4, '#ffffff', '#3a2412');
+  var tier = score >= 40 ? 4 : score >= 30 ? 3 : score >= 20 ? 2 : score >= 10 ? 1 : 0;
+  medal(px + 56, py + 78, tier);
+  if (newBest) { R(ctx, '#3a2412', px + 88, py + 88, 48, 22); R(ctx, '#e8402c', px + 90, py + 90, 44, 18); txt('جديد!', px + 112, py + 100, 13, '#fff', null); }
+  var bw = pw - 60, bx = px + 30, by = py + ph + 18, ready = overT > 0.7;
+  ctx.globalAlpha = e * (ready ? 1 : 0.45);
+  R(ctx, '#2a4a10', bx - 3, by - 3, bw + 6, 46); R(ctx, '#5cc038', bx, by, bw, 40); R(ctx, '#8ae850', bx, by, bw, 4); R(ctx, '#3e8a28', bx, by + 36, bw, 4);
+  txt('العب مرة أخرى', W / 2, by + 21, 19, '#ffffff', '#2a4a10');
+  ctx.restore();
+}
+function render() {
+  ctx.save();
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (shake > 0) ctx.translate((Math.random() * 2 - 1) * shake * 6, (Math.random() * 2 - 1) * shake * 6);
+  if (trans) {
+    var e = smooth(trans.t), A = worlds[trans.from], B = worlds[trans.to];
+    drawBackdrop(A, 1); drawBackdrop(B, e);
+    drawPipes(trans.from, 1); drawPipes(trans.to, e);
+    drawGround(A, 1); drawGround(B, e);
+    if (A.fxFront) A.fxFront(ctx, 1 - e); if (B.fxFront) B.fxFront(ctx, e);
+  } else {
+    var w = worlds[curWorld];
+    drawBackdrop(w, 1); drawPipes(curWorld, 1); drawGround(w, 1);
+    if (w.fxFront) w.fxFront(ctx, 1);
+  }
+  ctx.globalAlpha = 1;
+  drawBird();
+  ctx.restore();
+  if (flash > 0) { ctx.globalAlpha = Math.min(1, flash); ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+  if (state === STATE.READY) drawReady();
+  if (state === STATE.OVER) drawOver();
+  drawHUD();
+}
+
+/* =====================================================================
+   الإدخال (لمس / ماوس / لوحة المفاتيح)
+   ===================================================================== */
+function onPress(x, y) {
+  if (x !== null && x > W - 46 && y < 46) { Snd.toggle(); return; }
+  if (state === STATE.READY) startPlay();
+  else if (state === STATE.PLAY) flap();
+  else if (state === STATE.OVER && overT > 0.7) resetToReady();
+}
+window.addEventListener('pointerdown', function (e) {
+  e.preventDefault(); Snd.unlock();
+  var r = cv.getBoundingClientRect();
+  onPress((e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H);
+}, { passive: false });
+window.addEventListener('keydown', function (e) {
+  Snd.unlock();
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') { e.preventDefault(); if (!e.repeat) onPress(null, 0); }
+  else if (e.code === 'KeyM') Snd.toggle();
+});
+['touchend', 'pointerup', 'click'].forEach(function (n) { window.addEventListener(n, Snd.unlock, { passive: true }); });
+document.addEventListener('gesturestart', function (e) { e.preventDefault(); });
+document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+/* =====================================================================
+   الحجم والحلقة الرئيسية (60 إطار/ثانية)
+   ===================================================================== */
+function resize() {
+  var vw = window.innerWidth, vh = window.innerHeight, sc = Math.min(vw / W, vh / H), dpr = window.devicePixelRatio || 1, K = dpr >= 1.75 ? 2 : 1;
+  cv.width = W * K; cv.height = H * K;
+  cv.style.width = Math.floor(W * sc) + 'px'; cv.style.height = Math.floor(H * sc) + 'px';
+  ctx.setTransform(K, 0, 0, K, 0, 0); ctx.imageSmoothingEnabled = false;
+}
+window.addEventListener('resize', resize); window.addEventListener('orientationchange', function () { setTimeout(resize, 100); });
+resize();
+
+var last = 0, errShown = false;
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (!last) { last = ts; return; }
+  var dt = (ts - last) / 1000; last = ts;
+  if (dt <= 0) return; if (dt > 0.05) dt = 0.05;
+  try { update(dt); render(); } catch (err) { if (!errShown) { errShown = true; console.error(err); } }
+}
+document.addEventListener('visibilitychange', function () { last = 0; });
+
+worlds = [buildW1(), buildW2(), buildW3(), buildW4()];
+pipeSpr = pipeDefs().map(makePipe);
+birdImg = makeBird();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
